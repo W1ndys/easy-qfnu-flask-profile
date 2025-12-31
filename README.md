@@ -2,8 +2,6 @@
 
 > 一个安全、模块化、社区驱动的教务系统中间件服务
 
-![项目架构图占位符](./docs/architecture.png)
-
 ---
 
 ## 项目概述
@@ -60,33 +58,296 @@
 
 ## 系统架构
 
+### 整体架构图
+
+```mermaid
+flowchart TB
+    subgraph Client["🖥️ 客户端层"]
+        Browser["用户浏览器<br/>Vue 3 + Vant 4 + PWA"]
+    end
+
+    subgraph Security["🛡️ 安全层"]
+        WAF["雷池 WAF :8080<br/>SQL注入/XSS/CC防护"]
+    end
+
+    subgraph Application["⚙️ 应用层 - Flask :8000"]
+        direction TB
+        subgraph Routes["路由层 routes/"]
+            Auth["auth.py<br/>认证"]
+            Score["score.py<br/>成绩"]
+            Schedule["schedule.py<br/>课表"]
+            More["...20+ 模块"]
+        end
+
+        subgraph Core["核心层 core/"]
+            Security2["security.py<br/>加密/哈希"]
+            Database["database.py<br/>数据库管理"]
+            Decorators["decorators.py<br/>装饰器"]
+            Logger["logger.py<br/>日志系统"]
+        end
+
+        subgraph Spider["爬虫层 spider/"]
+            AuthSpider["auth.py<br/>登录爬虫"]
+            ScoreSpider["score.py<br/>成绩爬虫"]
+            MoreSpider["...8+ 爬虫"]
+        end
+
+        subgraph Tasks["定时任务"]
+            Backup["数据库备份"]
+            LogAgg["日志聚合"]
+            Cleanup["过期清理"]
+        end
+    end
+
+    subgraph Storage["💾 存储层"]
+        SQLite[("SQLite<br/>campus.db")]
+        Logs["📁 日志文件<br/>data/logs/"]
+        Backups["📁 备份文件<br/>data/backups/"]
+    end
+
+    subgraph External["🌐 外部系统"]
+        School["学校教务系统<br/>jsxsd"]
+    end
+
+    Browser -->|HTTPS| WAF
+    WAF -->|反向代理| Routes
+    Routes --> Core
+    Routes --> Spider
+    Core --> SQLite
+    Core --> Logs
+    Tasks --> SQLite
+    Tasks --> Backups
+    Spider -->|爬虫请求| School
+
+    style Client fill:#e1f5fe
+    style Security fill:#fff3e0
+    style Application fill:#f3e5f5
+    style Storage fill:#e8f5e9
+    style External fill:#fce4ec
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         用户浏览器                               │
-│                    (Vue 3 + Vant 4 + PWA)                       │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │ HTTPS
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      雷池 WAF (:8080)                            │
-│              SQL注入/XSS/CC攻击防护 + IP黑名单                    │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │ 反向代理
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   Flask 应用 (:8000)                             │
-│  ┌──────────────┬──────────────┬──────────────┬──────────────┐  │
-│  │   路由层     │   核心层      │   爬虫层     │   定时任务    │  │
-│  │  (routes/)  │   (core/)    │  (spider/)  │  (backup.py) │  │
-│  └──────────────┴──────────────┴──────────────┴──────────────┘  │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-        ┌──────────┐   ┌──────────┐   ┌──────────────┐
-        │  SQLite  │   │ 日志文件  │   │ 学校教务系统  │
-        │ (campus) │   │  (logs/) │   │   (爬虫)     │
-        └──────────┘   └──────────┘   └──────────────┘
+
+### 请求处理流程
+
+```mermaid
+sequenceDiagram
+    participant U as 用户浏览器
+    participant W as 雷池 WAF
+    participant F as Flask 应用
+    participant D as SQLite
+    participant S as 学校教务系统
+
+    U->>W: HTTPS 请求
+    W->>W: SQL注入/XSS检测
+    W->>F: 转发请求
+
+    F->>F: before_request<br/>生成 request_id
+    F->>D: 验证 Token
+
+    alt Token 有效
+        F->>D: 获取加密的 Cookies
+        F->>F: Fernet 解密
+        F->>S: 携带 Cookies 爬取数据
+        S-->>F: 返回 HTML
+        F->>F: BeautifulSoup 解析
+        F->>F: @action_logger 记录日志
+        F-->>U: JSON 响应
+    else Token 无效
+        F-->>U: 401 未授权
+    end
+```
+
+### 数据库 ER 图
+
+```mermaid
+erDiagram
+    sessions {
+        text token PK
+        text session_key
+        blob cookies_blob
+        text student_hash
+        real created_at
+        real expires_at
+    }
+
+    action_logs {
+        int id PK
+        text level
+        text session_id
+        text action_type
+        text ip_address
+        text message
+        text details
+        real cost_time
+        real created_at
+    }
+
+    action_logs_hourly {
+        int id PK
+        real hour_start
+        text date_str
+        text action_type
+        int total_count
+        int unique_sessions
+        real avg_cost_time
+    }
+
+    feedbacks {
+        int id PK
+        text type
+        text content
+        text student_hash
+        text reply
+        int status
+        int is_hidden
+    }
+
+    score_contributions {
+        int id PK
+        text term
+        text course_code
+        text course_name
+        text teacher_names
+        real score_value
+        text contribution_hash UK
+    }
+
+    teacher_score_links {
+        int id PK
+        int contribution_id FK
+        text teacher_name
+        text course_name
+        real score_value
+    }
+
+    banned_students {
+        int id PK
+        text student_id_hash UK
+        text reason
+    }
+
+    sessions ||--o{ action_logs : "session_id"
+    action_logs ||--o{ action_logs_hourly : "聚合"
+    score_contributions ||--o{ teacher_score_links : "contribution_id"
+```
+
+### 前端模块依赖图
+
+```mermaid
+flowchart LR
+    subgraph Pages["📄 页面层 pages/"]
+        Home["home/index.js"]
+        Score["score/index.js"]
+        Schedule["schedule/index.js"]
+        Admin["admin/index.js"]
+    end
+
+    subgraph Services["🔌 服务层 services/"]
+        AuthSvc["auth.js"]
+        ScoreSvc["score.js"]
+        HomeSvc["home.js"]
+    end
+
+    subgraph Core["🧱 核心层 core/"]
+        Request["request.js<br/>Axios 封装"]
+        AuthGuard["auth-guard.js<br/>认证守卫"]
+        Utils["utils.js<br/>工具函数"]
+        Logger["logger.js<br/>前端日志"]
+    end
+
+    subgraph External["📦 CDN 依赖"]
+        Vue["Vue 3"]
+        Vant["Vant 4"]
+        Axios["Axios"]
+    end
+
+    Home --> HomeSvc
+    Home --> AuthGuard
+    Score --> ScoreSvc
+    Score --> AuthGuard
+    Schedule --> AuthGuard
+    Admin --> AuthGuard
+
+    AuthSvc --> Request
+    ScoreSvc --> Request
+    HomeSvc --> Request
+
+    AuthGuard --> AuthSvc
+    AuthGuard --> Logger
+    Request --> Logger
+    Request --> Axios
+
+    style Pages fill:#e3f2fd
+    style Services fill:#fff8e1
+    style Core fill:#f1f8e9
+    style External fill:#fce4ec
+```
+
+### 安全架构图
+
+```mermaid
+flowchart TB
+    subgraph Internet["🌐 互联网"]
+        Attacker["攻击者"]
+        User["正常用户"]
+    end
+
+    subgraph Layer1["第一层: 网络防护"]
+        WAF["雷池 WAF<br/>• SQL注入拦截<br/>• XSS过滤<br/>• CC攻击防护<br/>• IP黑名单"]
+    end
+
+    subgraph Layer2["第二层: 应用防护"]
+        Token["Token 认证"]
+        UA["User-Agent 绑定"]
+        Expire["会话过期机制"]
+        Ban["封禁检查"]
+    end
+
+    subgraph Layer3["第三层: 数据防护"]
+        Fernet["Fernet 加密<br/>Cookies 存储"]
+        Hash["SHA-256 哈希<br/>学号脱敏"]
+        PathCheck["路径遍历防护<br/>备份文件访问"]
+    end
+
+    subgraph Layer4["第四层: 审计追踪"]
+        ActionLog["操作日志"]
+        LoginLog["登录日志"]
+        ErrorLog["异常监控"]
+    end
+
+    Attacker -->|恶意请求| WAF
+    User -->|正常请求| WAF
+    WAF -->|拦截| Attacker
+    WAF -->|放行| Layer2
+    Layer2 --> Layer3
+    Layer3 --> Layer4
+
+    style Layer1 fill:#ffcdd2
+    style Layer2 fill:#fff9c4
+    style Layer3 fill:#c8e6c9
+    style Layer4 fill:#bbdefb
+```
+
+### 定时任务调度图
+
+```mermaid
+gantt
+    title 每日定时任务调度
+    dateFormat HH:mm
+    axisFormat %H:%M
+
+    section 日志任务
+    日志聚合 (每小时:05)     :crit, 00:05, 5m
+    日志聚合 (每小时:05)     :crit, 01:05, 5m
+    日志聚合 (每小时:05)     :crit, 02:05, 5m
+    日志清理 (凌晨3点)       :active, 03:00, 10m
+
+    section 数据同步
+    QQ群列表同步 (每10分钟)  :done, 00:00, 10m
+    QQ群列表同步 (每10分钟)  :done, 00:10, 10m
+    QQ群列表同步 (每10分钟)  :done, 00:20, 10m
+
+    section 备份任务
+    数据库备份 (可配置时间)  :milestone, 04:00, 0m
 ```
 
 ---
